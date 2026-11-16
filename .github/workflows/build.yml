@@ -1,0 +1,100 @@
+# finnish – builds the Android APK on every upload (the Windows EXE only when you ask for it).
+# Put this file at  .github/workflows/build.yml  (once).  Then just upload finnish-app.zip to the repository root:
+# the build unpacks it by itself, makes the APK and publishes it on the "Releases" page (tag: latest).
+# Build files kept by Actions are deleted after 1 day, so your free Actions storage stays empty.
+# To also get the Windows EXE: Actions -> Build finnish -> Run workflow -> tick "Also build the Windows EXE".
+name: Build finnish (APK)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      exe:
+        description: Also build the Windows EXE
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack finnish-app.zip (if it was uploaded)
+        run: |
+          if [ -f finnish-app.zip ]; then unzip -oq finnish-app.zip -x '.github/*'; echo "Unpacked finnish-app.zip"; fi
+          ls
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - name: Install packages
+        run: npm install --no-audit --no-fund
+      - name: Fetch Malayalam fonts (Manjari, Chilanka, Gayathri)
+        run: node scripts/fetch-fonts.mjs
+      - name: Create Android project
+        run: npx cap add android
+      - name: Add native helper and Open-with support
+        run: bash scripts/patch-android.sh
+      - name: Generate icons and splash
+        run: npx capacitor-assets generate --android
+      - name: Copy web app into Android
+        run: npx cap sync android
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk finnish.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: finnish-apk, path: finnish.apk, retention-days: 1 }
+
+  exe:
+    name: Windows EXE
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.exe }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack finnish-app.zip (if it was uploaded)
+        shell: pwsh
+        run: |
+          if (Test-Path finnish-app.zip) { Expand-Archive -Path finnish-app.zip -DestinationPath . -Force; Write-Host "Unpacked finnish-app.zip" }
+          Get-ChildItem
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install packages
+        run: npm install --no-audit --no-fund
+      - name: Fetch Malayalam fonts (Manjari, Chilanka, Gayathri)
+        run: node scripts/fetch-fonts.mjs
+      - name: Build installer and portable exe
+        run: npx electron-builder --win --publish never
+      - uses: actions/upload-artifact@v4
+        with: { name: finnish-windows, path: 'dist/*.exe', retention-days: 1 }
+
+  release:
+    name: Publish downloads
+    needs: [apk, exe]
+    if: ${{ !cancelled() && needs.apk.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Show files
+        run: ls -R out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: finnish – latest build
+          body: "Latest build of finnish. Download finnish.apk (Android) or the .exe files (Windows)."
+          files: |
+            out/finnish.apk
+            out/*.exe
+          fail_on_unmatched_files: false
